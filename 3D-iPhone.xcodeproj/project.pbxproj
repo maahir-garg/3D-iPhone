@@ -29,9 +29,22 @@
 		7D24C1C12EE99B32000CDF1D /* 3D-iPhoneUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "3D-iPhoneUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		7D24C1DE2EE9A218000CDF1D /* Exceptions for "3D-iPhone" folder in "3D-iPhone" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 7D24C1A92EE99B31000CDF1D /* 3D-iPhone */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		7D24C1AC2EE99B31000CDF1D /* 3D-iPhone */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				7D24C1DE2EE9A218000CDF1D /* Exceptions for "3D-iPhone" folder in "3D-iPhone" target */,
+			);
 			path = "3D-iPhone";
 			sourceTree = "<group>";
 		};

@@ -1,6 +1,7 @@
 {
   "images" : [
     {
+      "filename" : "AR_icon_3D_1024.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
