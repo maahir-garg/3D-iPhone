@@ -31,7 +31,7 @@ class DataLogger {
         
         guard let fileURL = fileURL else { return }
         
-        let header = "Timestamp,X,Y,Z,Confidence\n"
+        let header = "Timestamp,Lap_ID,X,Y,Z,Confidence\n"
         
         queue.async {
             do {
@@ -47,15 +47,16 @@ class DataLogger {
     
     /// Appends a new data row to the CSV file.
     /// - Parameters:
+    ///   - lapID: The current lap identifier.
     ///   - x: X coordinate in world space (meters).
     ///   - y: Y coordinate in world space (meters).
     ///   - z: Z coordinate in world space (meters).
     ///   - confidence: Confidence score of the detection (0.0 to 1.0).
-    func appendLog(x: Float, y: Float, z: Float, confidence: Float) {
+    func appendLog(lapID: Int, x: Float, y: Float, z: Float, confidence: Float) {
         guard let fileURL = fileURL else { return }
         
         let timestamp = Date().timeIntervalSince1970
-        let row = String(format: "%.6f,%.6f,%.6f,%.6f,%.4f\n", timestamp, x, y, z, confidence)
+        let row = String(format: "%.6f,%d,%.6f,%.6f,%.6f,%.4f\n", timestamp, lapID, x, y, z, confidence)
         
         queue.async {
             if let fileHandle = try? FileHandle(forWritingTo: fileURL) {

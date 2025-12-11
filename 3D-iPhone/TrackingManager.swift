@@ -13,6 +13,7 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
     @Published var currentPosition: SIMD3<Float> = .zero
     @Published var confidence: Float = 0.0
     @Published var statusMessage: String = "Initializing..."
+    @Published var currentLap: Int = 0 // 0 = No Lap / Setup
     
     // MARK: - Internal Properties
     
@@ -62,6 +63,7 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
     func startRecording() {
         isRecording = true
         dataLogger.resetLog()
+        currentLap = 0 
         statusMessage = "Recording..."
     }
     
@@ -72,6 +74,20 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
     
     func getExportURL() -> URL? {
         return dataLogger.getCSVPath()
+    }
+
+    // MARK: - Lap Control
+    
+    func startLap() {
+        currentLap = 1
+    }
+    
+    func nextLap() {
+        currentLap += 1
+    }
+    
+    func resetLaps() {
+        currentLap = 0
     }
     
     // MARK: - ARSessionDelegate
@@ -141,7 +157,7 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
                     
                     // Log if recording
                     if isRecording {
-                        dataLogger.appendLog(x: worldPos.x, y: worldPos.y, z: worldPos.z, confidence: indexTipPoint.confidence)
+                        dataLogger.appendLog(lapID: currentLap, x: worldPos.x, y: worldPos.y, z: worldPos.z, confidence: indexTipPoint.confidence)
                     }
                 }
             } else {
