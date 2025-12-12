@@ -31,7 +31,7 @@ class DataLogger {
         
         guard let fileURL = fileURL else { return }
         
-        let header = "Timestamp,Lap_ID,X,Y,Z,Confidence\n"
+        let header = "Timestamp,Lap_ID,ScreenX_Meters,ScreenY_Meters,Depth_Meters,Confidence\n"
         
         queue.async {
             do {
@@ -48,9 +48,9 @@ class DataLogger {
     /// Appends a new data row to the CSV file.
     /// - Parameters:
     ///   - lapID: The current lap identifier.
-    ///   - x: X coordinate in world space (meters).
-    ///   - y: Y coordinate in world space (meters).
-    ///   - z: Z coordinate in world space (meters).
+    ///   - x: Screen X in meters (Center=0).
+    ///   - y: Screen Y in meters (Center=0, Up=+).
+    ///   - z: Depth in meters (Distance).
     ///   - confidence: Confidence score of the detection (0.0 to 1.0).
     func appendLog(lapID: Int, x: Float, y: Float, z: Float, confidence: Float) {
         guard let fileURL = fileURL else { return }

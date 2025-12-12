@@ -27,7 +27,7 @@ struct ARViewContainer: UIViewRepresentable {
     
     func updateUIView(_ uiView: ARView, context: Context) {
         // Update the visual indicator based on the tracking position
-        context.coordinator.updateSphere(at: trackingManager.currentPosition)
+        context.coordinator.updateSphere(at: trackingManager.currentWorldPosition)
     }
     
     func makeCoordinator() -> Coordinator {

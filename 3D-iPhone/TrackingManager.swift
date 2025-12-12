@@ -11,6 +11,7 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
     
     @Published var isRecording: Bool = false
     @Published var currentPosition: SIMD3<Float> = .zero
+    @Published var currentWorldPosition: SIMD3<Float> = .zero // For AR Visualization
     @Published var confidence: Float = 0.0
     @Published var statusMessage: String = "Initializing..."
     @Published var currentLap: Int = 0 // 0 = No Lap / Setup
@@ -21,22 +22,33 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
     private let dataLogger = DataLogger()
     private var cancellables = Set<AnyCancellable>()
     
+    // Concurrency & Logic
+    private let visionQueue = DispatchQueue(label: "com.3diphone.vision", qos: .userInitiated)
+    private var isProcessingFrame = false
+    private var smoothingAlpha: Float = 0.6
+    
+    // Robustness State
+    private var lastValidPosition: SIMD3<Float>?
+    private var lostFramesCount: Int = 0
+    private let maxGhostingFrames = 5
+    
     // Vision Request
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
     
     // Config
-    // We want sceneDepth for LiDAR readings.
     private let arConfiguration: ARWorldTrackingConfiguration = {
         let config = ARWorldTrackingConfiguration()
-        config.planeDetection = [] // We don't strictly need planes, but good to have if we want to expand.
+        config.planeDetection = []
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
         }
-        // smoothedSceneDepth provides more stable readings but might have slightly more latency.
-        // For finger tracking, smoothed is usually better for "glued" visualization.
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
              config.frameSemantics.insert(.smoothedSceneDepth)
         }
+        
+        // Focus Locking (Best Effort)
+        config.isAutoFocusEnabled = false 
+        
         return config
     }()
     
@@ -45,7 +57,7 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
     override init() {
         super.init()
         arSession.delegate = self
-        handPoseRequest.maximumHandCount = 1 // Track only one hand for simplicity/performance
+        handPoseRequest.maximumHandCount = 1
     }
     
     // MARK: - Session Control
@@ -93,172 +105,173 @@ class TrackingManager: NSObject, ObservableObject, ARSessionDelegate {
     // MARK: - ARSessionDelegate
     
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // 1. Prepare Vision Handler
+        guard !isProcessingFrame else { return }
+        isProcessingFrame = true
+        
+        // Capture frame data
         let pixelBuffer = frame.capturedImage
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        let cameraTransform = frame.camera.transform
         
-        // 2. Perform Vision Request (Async to not block ARKit delegate too much, though fast enough for main in simple apps)
-        // Note: For high perf, we dispatch this. But we need sync results to match the CURRENT ARFrame for depth.
-        // Since we need to raycast on *this specific frame*, we should do it synchronously here or capture the frame.
-        // Given iPhone 17 Pro power, sync vision on delegate is usually acceptable for single hand.
-        
-        do {
-            try handler.perform([handPoseRequest])
+        visionQueue.async { [weak self] in
+            guard let self = self else { return }
+            defer { self.isProcessingFrame = false }
             
-            guard let observation = handPoseRequest.results?.first else {
-                // No hand detected
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+            
+            do {
+                try handler.perform([self.handPoseRequest])
+                
+                var foundValidPoint = false
+                var currentPos: SIMD3<Float> = .zero
+                var currentWorld: SIMD3<Float> = .zero
+                var currentConf: Float = 0.0
+                
+                if let observation = self.handPoseRequest.results?.first,
+                   let indexTipPoint = try? observation.recognizedPoint(.indexTip),
+                   indexTipPoint.confidence > 0.3 {
+                    
+                    let visionPoint = CGPoint(x: indexTipPoint.location.x, y: indexTipPoint.location.y)
+                    
+                    // Unproject
+                    if let (metricPos, worldPos) = self.get25DMetricPosition(for: visionPoint, using: frame, cameraTransform: cameraTransform) {
+                        currentPos = metricPos
+                        currentWorld = worldPos
+                        currentConf = indexTipPoint.confidence
+                        foundValidPoint = true
+                        
+                        self.lostFramesCount = 0
+                        self.lastValidPosition = currentPos
+                    }
+                }
+                
+                // Ghosting Logic
+                if !foundValidPoint {
+                    self.lostFramesCount += 1
+                    if self.lostFramesCount <= self.maxGhostingFrames, let lastPos = self.lastValidPosition {
+                        currentPos = lastPos
+                        // Estimate world pos for ghost based on current camera? 
+                        // It's shaky, but better than zero. Let's just zero world for ghost or keep last?
+                        // Keeping last known world pos might be wrong if camera moved.
+                        // Reconstruct world from stored metric + current camera?
+                        // Too complex for ghosting. Let's just hide the dot (Zero World) if ghosting.
+                        currentWorld = .zero 
+                        currentConf = 0.1 
+                        foundValidPoint = true
+                    }
+                }
+                
                 DispatchQueue.main.async {
-                    self.confidence = 0.0
-                    self.statusMessage = self.isRecording ? "Recording (No Hand)" : "Searching for Hand..."
-                }
-                return
-            }
-            
-            // 3. Get Index Tip
-            let indexTipPoint = try observation.recognizedPoint(.indexTip)
-            
-            // 4. Unproject 2D -> 3D
-            // Vision gives normalized coordinates (0,0 bottom-left to 1,1 top-right).
-            if indexTipPoint.confidence > 0.3 {
-                // Convert Vision point (Y-up) to ARKit/Screen point (Y-down usually for some APIs, but ARFrame raycast accepts normalized 0..1 with Y-up?
-                // Wait, raycast(from:) takes a CGPoint in viewport capability.
-                // It's safer to use the standard coordinate conversion.
-                // Vision: (0,0) bottom-left.
-                // Viewport: depends on orientation, but usually (0,0) top-left.
-                // However, frame.raycastQuery uses normalized point in image coordinate system (0..1).
-                // Let's verify. ARFrame.camera.transform puts identity in landscape.
-                // Vision handler was passed .up.
-                // Let's assume standard normalization and simple flip if needed.
-                // Actually, `frame.raycastQuery` expects normalized point in image coordinate system (0..1).
-                // Vision is (x, 1-y) relative to Metal/ARKit textures usually.
-                
-                // Let's try straight mapping first, but Vision y is inverted relative to UIKit.
-                // Vision: (0,0) is bottom-left.
-                // ARKit Image: (0,0) is usually top-left.
-                // Vision: (0,0) is bottom-left.
-                // We pass it as-is to unprojection, where we handle the coordinate flip for texture sampling.
-                // Actually, wait. `visionPoint` uses Vision Coordinates (0..1, 0=Bottom).
-                // The `get3DPosition` function expects `normalizedPoint` to be Vision Coordinates?
-                // Yes, "normalizedPoint: CGPoint" (Vision 0..1).
-                // Inside `get3DPosition`, we do `pixelY = (1 - normalizedPoint.y) * H`.
-                // So we should pass the raw Vision Observation point here (0=Bottom).
-                guard let visionPoint = try? observation.recognizedPoint(.indexTip).location else { return } // location is (x, y)
-                
-                if let worldPos = get3DPosition(for: visionPoint, using: frame) {
-                    
-                    let posVector = SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z)
-                    
-                    // Update State
-                    DispatchQueue.main.async {
-                        self.currentPosition = posVector
-                        self.confidence = indexTipPoint.confidence
-                        self.statusMessage = self.isRecording ? "Recording..." : "Tracking Hand"
-                    }
-                    
-                    // Log if recording
-                    if isRecording {
-                        dataLogger.appendLog(lapID: currentLap, x: worldPos.x, y: worldPos.y, z: worldPos.z, confidence: indexTipPoint.confidence)
+                    if foundValidPoint {
+                        // Smoothing (EMA)
+                        let oldPos = self.currentPosition
+                        let isReset = oldPos == .zero || self.lostFramesCount > 0
+                        
+                        let smoothedX = (self.smoothingAlpha * currentPos.x + (1 - self.smoothingAlpha) * oldPos.x)
+                        let smoothedY = (self.smoothingAlpha * currentPos.y + (1 - self.smoothingAlpha) * oldPos.y)
+                        let smoothedZ = (self.smoothingAlpha * currentPos.z + (1 - self.smoothingAlpha) * oldPos.z)
+                        
+                        let finalPos = isReset ? currentPos : SIMD3<Float>(smoothedX, smoothedY, smoothedZ)
+                        
+                        self.currentPosition = finalPos
+                        self.currentWorldPosition = currentWorld // No smoothing on visual dot for snappy response? Or smooth it too?
+                        // Visually, jittery dot is bad. Let's smooth world too.
+                        // Or just use the Raw World for now.
+                        
+                        self.confidence = currentConf
+                        
+                        if finalPos.z < 0.15 {
+                            self.statusMessage = "Too Close! Move Back"
+                        } else if self.lostFramesCount > 0 {
+                            self.statusMessage = "Tracking... (Ghost)"
+                        } else {
+                            self.statusMessage = self.isRecording ? "Recording..." : "Tracking Hand"
+                        }
+                        
+                        if self.isRecording {
+                            self.dataLogger.appendLog(lapID: self.currentLap, x: finalPos.x, y: finalPos.y, z: finalPos.z, confidence: currentConf)
+                        }
+                        
+                    } else {
+                        self.confidence = 0.0
+                        self.statusMessage = self.isRecording ? "Rec (Lost Focus)" : "Searching..."
+                        self.lastValidPosition = nil
+                        self.currentWorldPosition = .zero
                     }
                 }
-            } else {
-                 DispatchQueue.main.async { self.confidence = 0.0 }
+                
+            } catch {
+                print("Vision Error: \(error)")
             }
-            
-        } catch {
-            print("Vision Error: \(error)")
         }
     }
     
-    // MARK: - 3D Unprojection Logic
+    // MARK: - 2.5D Metric Logic + Kernel Depth
     
-    /// Calculates the 3D world position from a 2D normalized point using LiDAR depth.
-    private func get3DPosition(for normalizedPoint: CGPoint, using frame: ARFrame) -> SIMD3<Float>? {
-        // Method 1: Raycast against the estimated Scene Geometry (LiDAR Mesh / Plane)
-        // This is robust for surfaces, but for a finger in mid-air, it might hit the wall BEHIND the finger.
-        // We really want the depth of the pixel *at* the finger.
-        // However, the finger itself is not part of the static scene mesh usually unless we are meshing constantly.
-        // BUT, we have `sceneDepth` or `smoothedSceneDepth`. We can sample the depth map directly.
+    // Returns (ScreenMetric, WorldPosition)
+    private func get25DMetricPosition(for normalizedPoint: CGPoint, using frame: ARFrame, cameraTransform: simd_float4x4) -> (SIMD3<Float>, SIMD3<Float>)? {
+        guard let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap else { return nil }
         
-        guard let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap else {
-            // Fallback: Raycast against estimated planes if no LiDAR depth map (shouldn't happen on Pro).
-            return raycastPlane(point: normalizedPoint, frame: frame)
-        }
-        
-        // Sample the depth map at the normalized coordinate.
         let depthWidth = CVPixelBufferGetWidth(depthMap)
         let depthHeight = CVPixelBufferGetHeight(depthMap)
         
         let col = Int(normalizedPoint.x * CGFloat(depthWidth))
         let row = Int(normalizedPoint.y * CGFloat(depthHeight))
         
-        // Safety check
         guard col >= 0, col < depthWidth, row >= 0, row < depthHeight else { return nil }
         
-        // Lock and read
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         
-        // Depth maps are Float32 usually
         guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
         let widthStep = CVPixelBufferGetBytesPerRow(depthMap)
-        let offset = row * widthStep + col * 4 // 4 bytes per Float32
         
-        // Read depth value in meters
-        let depthInMeters = baseAddress.load(fromByteOffset: offset, as: Float32.self)
+        // Kernel Search (3x3)
+        // We want the MINIMUM valid depth in the kernel (closest object = finger).
+        // Background wall will be further away.
+        var minDepth: Float32 = .greatestFiniteMagnitude
+        var foundDepth = false
         
-        // Check for valid depth (non-zero)
-        if depthInMeters > 0 {
-            // Manual Unprojection using Camera Intrinsics
-            // We convert the normalized point (0..1) to pixel coordinates.
+        let kernelSize = 2 // -2 to +2 = 5x5. Let's do 1 (-1 to +1 = 3x3) for speed/tightness.
+        
+        for dy in -1...1 {
+            for dx in -1...1 {
+                let c = col + dx
+                let r = row + dy
+                if c >= 0 && c < depthWidth && r >= 0 && r < depthHeight {
+                    let off = r * widthStep + c * 4
+                    let d = baseAddress.load(fromByteOffset: off, as: Float32.self)
+                    if d > 0 && d < minDepth {
+                        minDepth = d
+                        foundDepth = true
+                    }
+                }
+            }
+        }
+        
+        if foundDepth {
+            let Z = Float(minDepth)
+            
+            // Intrinsic Pinhole Math
             let intrinsics = frame.camera.intrinsics
             let textureSize = frame.camera.imageResolution
             
-            // Vision Point: normalized (0,0 bottom-left).
-            // Image Texture: (0,0 top-left).
-            // We must flip Y to sample the texture correctly (Vision Y=1 -> Image Row 0).
             let pixelX = normalizedPoint.x * CGFloat(textureSize.width)
             let pixelY = (1 - normalizedPoint.y) * CGFloat(textureSize.height)
             
-            // Camera Space Calculation
-            // ARKit Camera: +X Right, +Y Up, -Z Forward.
-            // Image Space: u increases Right, v increases Down.
+            // Metric on Screen Plane
+            let X_metric = (Float(pixelX) - intrinsics[2, 0]) * Z / intrinsics[0, 0]
+            let Y_metric = -(Float(pixelY) - intrinsics[2, 1]) * Z / intrinsics[1, 1] // Up is Positive
             
-            // Depth is distance (positive). Z_cam is -depth.
-            // Pinhole Model (Virtual Plane): Left Pixel (u < ox) -> Left Camera Point (x < 0).
-            // This requires scaling by POSITIVE depth. Using signed Z (-depth) flips the axes.
+            // World Space Calculation
+            // Camera Space Point (Right Handed: X Right, Y Up, Z Backwards/Toward User)
+            // Depth Z is positive distance in front. So Camera Space Z is -Z.
+            let localPoint = SIMD4<Float>(X_metric, Y_metric, -Z, 1)
+            let worldPos4 = cameraTransform * localPoint
+            let worldPos = SIMD3<Float>(worldPos4.x, worldPos4.y, worldPos4.z)
             
-            let depth = Float(depthInMeters)
-            
-            // X = (u - ox) * depth / fx
-            let x = (Float(pixelX) - intrinsics[2, 0]) * depth / intrinsics[0, 0]
-            
-            // Y = (v - oy) * depth / fy
-            // BUT: Image Y increases DOWN. Camera Y increases UP.
-            // So we must invert the Y delta.
-            let y = -(Float(pixelY) - intrinsics[2, 1]) * depth / intrinsics[1, 1]
-            
-            // Z = -depth
-            let z = -depth
-            
-            let localPoint = SIMD4<Float>(x, y, z, 1)
-            let worldPos = frame.camera.transform * localPoint
-            
-            return SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z)
-            
-        } else {
-             return raycastPlane(point: normalizedPoint, frame: frame)
+            return (SIMD3<Float>(X_metric, Y_metric, Z), worldPos)
         }
-    }
-    
-    // Fallback raycast
-    private func raycastPlane(point: CGPoint, frame: ARFrame) -> SIMD3<Float>? {
-        let query = frame.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .any)
         
-        // Use the session instance from the class
-        if let result = arSession.raycast(query).first {
-            let trans = result.worldTransform.columns.3
-            return SIMD3<Float>(trans.x, trans.y, trans.z)
-        }
         return nil
     }
 }
