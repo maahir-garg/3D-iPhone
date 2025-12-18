@@ -11,181 +11,209 @@ struct ContentView: View {
     // Config
     private let maxChartPoints = 300 // Keep last ~5 seconds at 60fps
     
+// MARK: - Navigation State
+    @State private var navigateToDashboard = false
+
     var body: some View {
-        ZStack {
-            // AR View (Full Screen)
-            ARViewContainer(trackingManager: trackingManager)
-                .edgesIgnoringSafeArea(.all)
-            
-            // Overlay UI
-            VStack {
-                // Top Info Bar & Lap Counter
-                HStack {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("3D Finger Tracking")
-                            .font(.headline)
-                            .foregroundColor(.white)
+        NavigationStack {
+            ZStack {
+                // AR View (Full Screen)
+                ARViewContainer(trackingManager: trackingManager)
+                    .edgesIgnoringSafeArea(.all)
+                
+                // Overlay UI
+                VStack {
+                    // Top Info Bar & Lap Counter
+                    HStack {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("3D Finger Tracking")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            
+                            Text(trackingManager.statusMessage)
+                                .font(.subheadline)
+                                .foregroundColor(getStatusColor())
+                            
+                            if trackingManager.confidence > 0 {
+                                Text("X: \(String(format: "%.3f", trackingManager.currentPosition.x)) m")
+                                Text("Y: \(String(format: "%.3f", trackingManager.currentPosition.y)) m")
+                                Text("Z: \(String(format: "%.3f", trackingManager.currentPosition.z)) m")
+                            }
+                        }
                         
-                        Text(trackingManager.statusMessage)
-                            .font(.subheadline)
-                            .foregroundColor(getStatusColor())
+                        Spacer()
                         
-                        if trackingManager.confidence > 0 {
-                            Text("X: \(String(format: "%.3f", trackingManager.currentPosition.x)) m")
-                            Text("Y: \(String(format: "%.3f", trackingManager.currentPosition.y)) m")
-                            Text("Z: \(String(format: "%.3f", trackingManager.currentPosition.z)) m")
+                        // Lap Counter Display
+                        if trackingManager.isRecording {
+                            VStack {
+                                Text("Lap")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.8))
+                                Text("\(trackingManager.currentLap)")
+                                    .font(.system(size: 40, weight: .bold))
+                                    .foregroundColor(.white)
+                            }
+                            .padding()
+                            .background(Color.black.opacity(0.6))
+                            .cornerRadius(10)
                         }
                     }
+                    .padding()
+                    .background(Color.black.opacity(0.4)) // Visual container for top bar
+                    .cornerRadius(15)
+                    .padding(.top, 50)
+                    .padding(.horizontal)
                     
                     Spacer()
                     
-                    // Lap Counter Display
-                    if trackingManager.isRecording {
-                        VStack {
-                            Text("Lap")
+                    // Debug Graph
+                    if showDebugGraph {
+                        VStack(alignment: .leading) {
+                            Text("Live Axis Data")
                                 .font(.caption)
-                                .foregroundColor(.white.opacity(0.8))
-                            Text("\(trackingManager.currentLap)")
-                                .font(.system(size: 40, weight: .bold))
                                 .foregroundColor(.white)
+                                .padding(.leading)
+                            
+                            Chart(chartData) { point in
+                                LineMark(
+                                    x: .value("Time", point.timestamp),
+                                    y: .value("Value", point.value)
+                                )
+                                .foregroundStyle(by: .value("Axis", point.axis))
+                            }
+                            .chartForegroundStyleScale([
+                                "X": .red, "Y": .green, "Z": .blue
+                            ])
+                            .chartYAxis {
+                                AxisMarks(position: .leading)
+                            }
+                            .frame(height: 150)
+                            .padding()
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(15)
                         }
-                        .padding()
-                        .background(Color.black.opacity(0.6))
-                        .cornerRadius(10)
+                        .padding(.horizontal)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
-                }
-                .padding()
-                .background(Color.black.opacity(0.4)) // Visual container for top bar
-                .cornerRadius(15)
-                .padding(.top, 50)
-                .padding(.horizontal)
-                
-                Spacer()
-                
-                // Debug Graph
-                if showDebugGraph {
-                    VStack(alignment: .leading) {
-                        Text("Live Axis Data")
-                            .font(.caption)
-                            .foregroundColor(.white)
-                            .padding(.leading)
+                    
+                    // Bottom Controls
+                    HStack(spacing: 20) {
                         
-                        Chart(chartData) { point in
-                            LineMark(
-                                x: .value("Time", point.timestamp),
-                                y: .value("Value", point.value)
-                            )
-                            .foregroundStyle(by: .value("Axis", point.axis))
-                        }
-                        .chartForegroundStyleScale([
-                            "X": .red, "Y": .green, "Z": .blue
-                        ])
-                        .chartYAxis {
-                            AxisMarks(position: .leading)
-                        }
-                        .frame(height: 150)
-                        .padding()
-                        .background(Color.black.opacity(0.7))
-                        .cornerRadius(15)
-                    }
-                    .padding(.horizontal)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-                
-                // Bottom Controls
-                HStack(spacing: 20) {
-                    
-                    // Toggle Debug
-                    Button(action: {
-                        withAnimation {
-                            showDebugGraph.toggle()
-                        }
-                    }) {
-                        VStack {
-                            Image(systemName: "chart.xyaxis.line")
-                                .font(.system(size: 24))
-                            Text("Debug")
-                                .font(.caption2)
-                        }
-                        .foregroundColor(showDebugGraph ? .yellow : .white)
-                        .padding(10)
-                        .background(Color.black.opacity(0.6))
-                        .clipShape(Circle())
-                    }
-                    
-                    if trackingManager.isRecording {
-                        // Lap Control Button
+                        // Toggle Debug
                         Button(action: {
-                            if trackingManager.currentLap == 0 {
-                                trackingManager.startLap()
-                            } else {
-                                trackingManager.nextLap()
+                            withAnimation {
+                                showDebugGraph.toggle()
                             }
                         }) {
-                            Text(trackingManager.currentLap == 0 ? "Start Lap 1" : "Next Lap")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .padding()
-                                .frame(minWidth: 120)
-                                .background(Color.orange)
-                                .cornerRadius(30)
+                            VStack {
+                                Image(systemName: "chart.xyaxis.line")
+                                    .font(.system(size: 24))
+                                Text("Debug")
+                                    .font(.caption2)
+                            }
+                            .foregroundColor(showDebugGraph ? .yellow : .white)
+                            .padding(10)
+                            .background(Color.black.opacity(0.6))
+                            .clipShape(Circle())
                         }
-                    }
-                    
-                    // Record Button
-                    Button(action: {
+                        
                         if trackingManager.isRecording {
-                            trackingManager.stopRecording()
-                            chartData = [] // Clear chart on stop
-                        } else {
-                            trackingManager.startRecording()
-                            chartData = []
+                            // Lap Control Button
+                            Button(action: {
+                                if trackingManager.currentLap == 0 {
+                                    trackingManager.startLap()
+                                } else {
+                                    trackingManager.nextLap()
+                                }
+                            }) {
+                                Text(trackingManager.currentLap == 0 ? "Start Lap 1" : "Next Lap")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                    .padding()
+                                    .frame(minWidth: 120)
+                                    .background(Color.orange)
+                                    .cornerRadius(30)
+                            }
                         }
-                    }) {
-                        VStack {
-                            Image(systemName: trackingManager.isRecording ? "stop.circle.fill" : "record.circle")
-                                .font(.system(size: 50))
-                                .foregroundColor(trackingManager.isRecording ? .red : .white)
+                        
+                        // Record Button
+                        Button(action: {
+                            if trackingManager.isRecording {
+                                trackingManager.stopRecording()
+                                chartData = [] // Clear chart on stop
+                            } else {
+                                trackingManager.startRecording()
+                                chartData = []
+                            }
+                        }) {
+                            VStack {
+                                Image(systemName: trackingManager.isRecording ? "stop.circle.fill" : "record.circle")
+                                    .font(.system(size: 50))
+                                    .foregroundColor(trackingManager.isRecording ? .red : .white)
+                            }
+                        }
+                        
+                        // Analysis Button (Replaces simple export for primary action, move export to secondary)
+                        if !trackingManager.isRecording {
+                            Button(action: {
+                                navigateToDashboard = true
+                            }) {
+                                VStack {
+                                    Image(systemName: "waveform.path.ecg")
+                                        .font(.system(size: 24))
+                                    Text("Analyze")
+                                        .font(.caption2)
+                                }
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(Color.blue)
+                                .clipShape(Circle())
+                            }
+                            
+                            // Keep Export accessible too
+                             Button(action: {
+                                showShareSheet = true
+                            }) {
+                                VStack {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(.system(size: 24))
+                                    Text("Export")
+                                        .font(.caption2)
+                                }
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(Color.gray)
+                                .clipShape(Circle())
+                            }
                         }
                     }
-                    
-                    // Export Button
-                    Button(action: {
-                        showShareSheet = true
-                    }) {
-                        VStack {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 24))
-                            Text("Export")
-                                .font(.caption2)
-                        }
-                        .foregroundColor(.white)
-                        .padding(10)
-                        .background(Color.blue)
-                        .clipShape(Circle())
-                    }
-                    .disabled(trackingManager.isRecording)
-                    .opacity(trackingManager.isRecording ? 0.5 : 1.0)
+                    .padding(.bottom, 20)
                 }
-                .padding(.bottom, 20)
             }
-        }
-        .onAppear {
-            trackingManager.startSession()
-        }
-        .onDisappear {
-            trackingManager.pauseSession()
-        }
-        .onChange(of: trackingManager.currentPosition) { newPos in
-            if showDebugGraph {
-                updateChart(position: newPos)
+            .navigationDestination(isPresented: $navigateToDashboard) {
+                if let url = trackingManager.getExportURL() {
+                    DashboardView(csvURL: url)
+                } else {
+                    Text("No Record Found")
+                }
             }
-        }
-        .sheet(isPresented: $showShareSheet) {
-            if let fileURL = trackingManager.getExportURL() {
-                ShareSheet(activityItems: [fileURL])
-            } else {
-                Text("No data to export.")
+            .onAppear {
+                trackingManager.startSession()
+            }
+            .onDisappear {
+                trackingManager.pauseSession()
+            }
+            .onChange(of: trackingManager.currentPosition) { newPos in
+                if showDebugGraph {
+                    updateChart(position: newPos)
+                }
+            }
+            .sheet(isPresented: $showShareSheet) {
+                if let fileURL = trackingManager.getExportURL() {
+                    ShareSheet(activityItems: [fileURL])
+                } else {
+                    Text("No data to export.")
+                }
             }
         }
     }
